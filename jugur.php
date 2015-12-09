@@ -67,7 +67,7 @@ else{
     //scandisk($dir);
     //sku2();
     //run();
-    //run2();
+    run2();
 }
 //saveexcel();
 //parsexcelsimple($dir);
@@ -106,456 +106,6 @@ if(isset($_GET['param']))
 
 //close the connection
 //mysql_close($dbhandle);
-
-function scandisk($dir, $sendermail=false)
-{
-    //mysql_query("INSERT INTO temir (text) VALUES('asdf')");
-    $files = scandir($dir, 1);
-    if(is_file($file=$dir.'/'.$files[0]))
-    {
-
-        //parsexcelsimple($file);
-        $info = pathinfo($file);
-        if(!$sendermail)
-        {
-            $sender=explode('--',$info['filename']);
-            if(isset($sender[1])) $sendermail=$sender[1]; else $sendermail='';
-
-            /*if($sendermail=='alla-ultra@mail.ru')
-            {
-                $newname=$dir.'/the--alla-ultra@mail.ru--file.xml';
-                rename($file, $newname); //because alla sends xml file with xls extension
-                $file=$newname;
-            }*/
-        }
-
-        $path = pathinfo(realpath($file), PATHINFO_DIRNAME);
-        if ($info["extension"] == "xls" || $info["extension"] == "xlsx"  || $info["extension"] == "xml")
-        {
-            //file from alla-ultra is saved as xls and it's corrupt. to fix it we use convert() in dmail() and skip the corrupted one here
-            //file from elenaultra is saved as skip and it's kinda also corrupt
-            if (strpos($info["basename"],'alla-ultra@mail.ru--file.xls') === false || strpos($info["basename"],'skip') === false) {
-                parsexcel($file, $sendermail);
-                //parsexcelsimple($file,$sendermail);
-                $sendermail='';
-            }
-            else{$sendermail=false;}
-
-        }
-        elseif($info["extension"] == "zip")
-        {
-            $zip = new ZipArchive;
-            if ($zip->open($file) === TRUE) {
-                $zip->extractTo($path);
-                $zip->close();
-            } else {
-                die("Can't open zip archive");
-            }
-        }
-        elseif($info["extension"] == "rar")
-        {
-            //install rar from here:http://php.net/manual/en/rar.installation.php
-            $rar_file = rar_open($file) or die("Can't open Rar archive");
-            $entries = rar_list($rar_file);
-            foreach ($entries as $entry) {
-                $entry->extract($path);
-            }
-            rar_close($rar_file);
-        }
-        unlink($file);
-        scandisk($dir,$sendermail);
-    }
-}
-
-function parsexcel($file, $sendermail)
-{
-
-    $dbh=$GLOBALS['dbh'];
-    $date=date('Y-m-d');
-    if (!file_exists($file)) {
-        exit('No file yoba');
-    }
-
-    /* Нужно перевести сомы в доллары для тех у кого цены в сомах */
-    if($sendermail=='alex@meloman.kg')
-    {
-        $string = file_get_contents("http://kivano.kg/product/exrateapi");
-        $exrate_arr=json_decode($string, true);
-        $exrate=$exrate_arr['usd'];
-    }
-    else $exrate=false;
-
-    //$notindbs=array();
-
-    /* ------ Здесь мы готовим слова для заголовок столбцов ------*/
-    $match_title=array();
-    $match_price=array();
-
-    $stmt = $dbh->prepare("SELECT title, price, note FROM thead");
-    if ($stmt->execute()) {
-        while ($row = $stmt->fetch()) {
-            if($row['title'] && !in_array($row['title'],$match_title)) $match_title[]=$row['title'];
-            if($row['price'] && !in_array($row['price'],$match_price)) $match_price[]=$row['price'];
-        }
-    }
-
-    /*-----------------*/
-
-    require_once dirname(__FILE__) . '/Classes/PHPExcel/IOFactory.php';
-    $file=mb_convert_encoding($file, 'Windows-1251', 'UTF-8');
-    $objReader = PHPExcel_IOFactory::createReaderForFile($file);
-    $objReader->setReadDataOnly(true);
-    $objPHPExcel=$objReader->load($file);
-
-    //for editing we need another object with formats //except from sigmaplus.kg
-    if($sendermail!='sigma@sigmaplus.kg')
-    {
-        $objReader->setReadDataOnly(false);
-        $objPHPExcelReport=$objReader->load($file);
-    }
-
-    $objWorksheet = $objPHPExcel->getActiveSheet();
-
-    $highestRow = $objWorksheet->getHighestRow(); // e.g. 10
-    $highestColumn = $objWorksheet->getHighestColumn(); // e.g 'F'
-    $columnIndex=PHPExcel_Cell::stringFromColumnIndex($highestColumn);
-    $highestColumnIndex = PHPExcel_Cell::columnIndexFromString($highestColumn); // e.g. 5
-    $sku_products=array();
-
-    $stmt = $dbh->prepare("SELECT product_id, title FROM sku WHERE sender='{$sendermail}'");
-    if ($stmt->execute()) {
-        while ($prod = $stmt->fetch()) {
-            $sku_products[]=array('product_id'=>$prod['product_id'], 'title'=>$prod['title']);
-        }
-    }
-
-    $product_rows=$dbh->query("SELECT product_id, price, changed FROM product")->fetchAll(PDO::FETCH_ASSOC);
-    $product_changed=array();
-    $product_price=array();
-    foreach($product_rows as $product_row)
-    {
-        $product_changed[$product_row['product_id']]=$product_row['changed'];
-        $product_price[$product_row['product_id']]=$product_row['price'];
-    }
-    $datesec=strtotime($date);
-
-    for ($row = 1; $row <= $highestRow; ++$row) {
-        $title=''; $price='';
-        for ($col = 0; $col <= $highestColumnIndex; ++$col) {
-            $curval=$objWorksheet->getCellByColumnAndRow($col, $row)->getCalculatedValue();
-
-            if($sendermail=='alex@meloman.kg') //Для этого поставщика отдельное условие ($tcolumn=2; $prcolumn=4;)
-            {
-                if($col==2 && $curval) $title=$curval;
-                elseif($col==4 && $curval) $price=$curval;
-            }
-            else if($sendermail=='elena25@ultra.kg') //Для этого поставщика отдельное условие ($tcolumn=0; $prcolumn=1;)
-            {
-                if($col==0 && $curval) $title=$curval;
-                elseif($col==1 && $curval) $price=$curval;
-            }
-            else
-            {
-                if(!isset($tcolumn) && (in_array($curval,$match_title) || strpos($curval, "Товар/Склад")!== false))
-                {$tcolumn=$col;}
-                if(!isset($prcolumn) && (in_array($curval,$match_price)))
-                {$prcolumn=$col;}
-                if (isset($tcolumn) && isset($prcolumn)) {
-                    if($col==$tcolumn && $curval) $title=$curval;
-                    elseif($col==$prcolumn && $curval) $price=$curval;
-                }
-                elseif($sendermail=='elena_dik@inbox.ru') //laptop prices file from this user doesn't have column headers
-                {
-                    if($col==0 && $curval)$title=$curval;
-                    elseif($col==1 && $curval) $price=$curval;
-                }
-            }
-        }
-
-        if($title && $price)
-        {
-            //echo 'title: '.$title." price:".$price."</br>";
-            if($exrate) $price=$price/$exrate;
-            $title2=strtolower(preg_replace("/\s/", "", $title));
-            $found_in_db=false;
-            $has_id=false;
-            if($sku_products)
-            {
-                foreach($sku_products as $sku_product)
-                {
-                    $pid=$sku_product['product_id'];
-                    $dbtitle=strtolower(preg_replace("/\s/", "", $sku_product['title']));
-                    if($title2==$dbtitle)
-                    {
-                        if($pid)
-                        {
-                            if(isset($product_changed[$pid]))
-                            {
-                                $timediff=$datesec-strtotime($product_changed[$pid]);
-                                $days=$timediff/(60*60*24);
-                            }
-                            if(isset($days) && $days<=7) //если цена была импортирована в течение последних 7и дней
-                            {
-                                if($product_price[$pid]>=$price) //то меняем если предыдущая цена была выше этой (или равна этой чтобы changed оставался актуальным для "наличие")
-                                    $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='1' WHERE product_id='{$pid}'");
-                            }
-                            else
-                            {
-                                $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='2' WHERE product_id='{$pid}'");
-                            }
-                            $has_id=true;
-                        }
-
-                        $found_in_db=true;
-                    }
-                    unset($days);
-                }
-                if(!$has_id)
-                {
-                    if($sendermail=='sigma@sigmaplus.kg')
-                    {
-                        $objPHPExcel->getActiveSheet()->getStyle('A'.$row.':F'.$row)->getFill()
-                            ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
-                            ->getStartColor()->setARGB('FFFF0000');
-                    }
-                    elseif($sendermail=='b2b@intermedia.kg')
-                    {
-                        $objPHPExcelReport->getActiveSheet()->getStyle($highestColumn.$row)->getFill()
-                            ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
-                            ->getStartColor()->setARGB('FFFF0000');
-                    }
-                    else
-                    {
-                        $objPHPExcelReport->getActiveSheet()->getStyle('A'.$row.':F'.$row)->getFill()
-                            ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
-                            ->getStartColor()->setARGB('FFFF0000');
-                    }
-                }
-                if(!$found_in_db)
-                {
-                    $stmt = $dbh->prepare("INSERT INTO sku (title, sender) VALUES (:title, :sender)");
-                    $stmt->bindParam(':title', $title);
-                    $stmt->bindParam(':sender', $sendermail);
-                    $stmt->execute();
-                }
-            }
-            else //new supplier
-            {
-                $sth = $dbh->prepare("SELECT product_id FROM sku WHERE product_id<>'0' AND title=:title");
-                $sth->bindParam(':title', $title, PDO::PARAM_STR);
-                $sth->execute();
-                $row=$sth->fetch(PDO::FETCH_ASSOC);
-                if($row['product_id']) $product_id=$row['product_id']; else $product_id=0;
-
-                $stmt = $dbh->prepare("INSERT INTO sku (title, sender, product_id) VALUES (:title, :sender, :pid)");
-                $stmt->bindParam(':title', $title, PDO::PARAM_STR);
-                $stmt->bindParam(':sender', $sendermail, PDO::PARAM_STR);
-                $stmt->bindParam(':pid', $product_id, PDO::PARAM_INT);
-                $stmt->execute();
-            }
-        }
-    }
-    $rand=rand(1,100);
-    if($sendermail!='sigma@sigmaplus.kg')
-    {
-        $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcelReport, 'Excel2007');
-    }
-    else $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcel, 'Excel2007');
-    $objWriter->save(dirname(__FILE__)."/report/".$date."/".$rand.'-'.$sendermail.".xlsx");
-}
-
-function parsexcelsimple($file, $sendermail)
-{
-
-    $dbh=$GLOBALS['dbh'];
-    $date=date('Y-m-d');
-    if (!file_exists($file)) {
-        exit('No file yoba');
-    }
-    $exrate=false;
-
-    //$notindbs=array();
-
-    /* ------ Здесь мы готовим слова для заголовок столбцов ------*/
-    $match_title=array();
-    $match_price=array();
-
-    $stmt = $dbh->prepare("SELECT title, price, note FROM thead");
-    if ($stmt->execute()) {
-        while ($row = $stmt->fetch()) {
-            if($row['title'] && !in_array($row['title'],$match_title)) $match_title[]=$row['title'];
-            if($row['price'] && !in_array($row['price'],$match_price)) $match_price[]=$row['price'];
-        }
-    }
-
-    /*-----------------*/
-
-    require_once dirname(__FILE__) . '/Classes/PHPExcel/IOFactory.php';
-    $file=mb_convert_encoding($file, 'Windows-1251', 'UTF-8');
-    $objReader = PHPExcel_IOFactory::createReaderForFile($file);
-    $objReader->setReadDataOnly(true);
-    $objPHPExcel=$objReader->load($file);
-
-    //for editing we need another object with formats //except from sigmaplus.kg
-    if($sendermail!='sigma@sigmaplus.kg')
-    {
-        $objReader->setReadDataOnly(false);
-        $objPHPExcelReport=$objReader->load($file);
-    }
-
-    $objWorksheet = $objPHPExcel->getActiveSheet();
-
-    $highestRow = $objWorksheet->getHighestRow(); // e.g. 10
-    $highestColumn = $objWorksheet->getHighestColumn(); // e.g 'F'
-    $highestColumnIndex = PHPExcel_Cell::columnIndexFromString($highestColumn); // e.g. 5
-    $sku_products=array();
-
-    $stmt = $dbh->prepare("SELECT product_id, title FROM sku WHERE sender='{$sendermail}'");
-    if ($stmt->execute()) {
-        while ($prod = $stmt->fetch()) {
-            $sku_products[]=array('product_id'=>$prod['product_id'], 'title'=>$prod['title']);
-        }
-    }
-
-    $product_rows=$dbh->query("SELECT product_id, price, changed FROM product")->fetchAll(PDO::FETCH_ASSOC);
-    $product_changed=array();
-    $product_price=array();
-    foreach($product_rows as $product_row)
-    {
-        $product_changed[$product_row['product_id']]=$product_row['changed'];
-        $product_price[$product_row['product_id']]=$product_row['price'];
-    }
-    $datesec=strtotime($date);
-
-    for ($row = 1; $row <= $highestRow; ++$row) {
-        $title=''; $price='';
-        for ($col = 0; $col <= $highestColumnIndex; ++$col) {
-            $curval=$objWorksheet->getCellByColumnAndRow($col, $row)->getCalculatedValue();
-
-            if($sendermail=='alex@meloman.kg') //Для этого поставщика отдельное условие ($tcolumn=2; $prcolumn=4;)
-            {
-                if($col==2 && $curval) $title=$curval;
-                elseif($col==4 && $curval) $price=$curval;
-            }
-            else if($sendermail=='elena25@ultra.kg') //Для этого поставщика отдельное условие ($tcolumn=0; $prcolumn=1;)
-            {
-                if($col==0 && $curval) $title=$curval;
-                elseif($col==1 && $curval) $price=$curval;
-            }
-            else
-            {
-                if(!isset($tcolumn) && (in_array($curval,$match_title) || strpos($curval, "Товар/Склад")!== false))
-                {$tcolumn=$col;}
-                if(!isset($prcolumn) && (in_array($curval,$match_price)))
-                {$prcolumn=$col;}
-                if (isset($tcolumn) && isset($prcolumn)) {
-                    if($col==$tcolumn && $curval) $title=$curval;
-                    elseif($col==$prcolumn && $curval) $price=$curval;
-                }
-                elseif($sendermail=='elena_dik@inbox.ru') //laptop prices file from this user doesn't have column headers
-                {
-                    if($col==0 && $curval)$title=$curval;
-                    elseif($col==1 && $curval) $price=$curval;
-                }
-            }
-        }
-
-        if($title && $price)
-        {
-            echo 'title: '.$title." price:".$price."</br>";
-        }
-    }
-    $rand=rand(1,100);
-    if($sendermail!='sigma@sigmaplus.kg')
-    {
-        $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcelReport, 'Excel2007');
-    }
-    else $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcel, 'Excel2007');
-    $objWriter->save(dirname(__FILE__)."/report/".$date."/".$rand.'-'.$sendermail.".xlsx");
-}
-
-function run(){
-    /*$dbh=$GLOBALS['dbh'];
-    $product_rows=$dbh->query("SELECT product_id, price, changed FROM product")->fetchAll(PDO::FETCH_ASSOC);
-    $product_changed=array();
-    $product_price=array();
-    foreach($product_rows as $product_row)
-    {
-        echo $product_row['product_id']."<br />";
-    }*/
-    $string = file_get_contents("http://kivano.kg/product/DeletedAPI");
-    var_dump($string);
-}
-function parsexcelsimple2($dir)
-{
-    $files = scandir($dir, 1);
-    if(is_file($file=$dir.'/'.$files[0]))
-    {
-        $match_title=array("Товар","Модель","model","Наименование товаров","Notebooks","НАИМЕНОВАНИЕ","Наименование");
-        $match_price=array("ДЛР (usd)","Цена реал (USD  )","price (USD  )","Цена","Мелкооптовая цена","Dealer ", "ЦЕНА","Дилер", "Price", "Дилерская");
-        require_once dirname(__FILE__) . '/Classes/PHPExcel/IOFactory.php';
-        $file=mb_convert_encoding($file, 'Windows-1251', 'UTF-8');
-        if (!file_exists($file)) {
-            exit("no file yoba" . PHP_EOL);}
-
-        $objReader = PHPExcel_IOFactory::createReaderForFile($file);
-        $objReader->setReadDataOnly(false);
-        $objPHPExcel=$objReader->load($file);
-
-        $objWorksheet = $objPHPExcel->getActiveSheet();
-
-        $highestRow = $objWorksheet->getHighestRow(); // e.g. 10
-        $highestColumn = $objWorksheet->getHighestColumn(); // e.g 'F'
-        $highestColumnIndex = PHPExcel_Cell::columnIndexFromString($highestColumn); // e.g. 5
-        $prods = mysql_query("SELECT product_id, sku, price FROM product") or die(mysql_error());
-        $products=array();
-        while($prod = mysql_fetch_array($prods))
-        {
-            $products[]=array('product_id'=>$prod['product_id'], 'sku'=>$prod['sku'], 'price'=>$prod['price']);
-        }
-        $date=date("Y-m-d");
-
-        for ($row = 1; $row <= $highestRow; ++$row) {
-            if($row==7)
-            {
-                $objPHPExcel->getActiveSheet()->getStyle('A'.$row.':I'.$row)->getFill()
-                    ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
-                    ->getStartColor()->setARGB('FFFF0000');
-            }
-
-        }
-
-        $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcel, 'Excel2007');
-        $objWriter->save("excel/2014-09-09/testrow.xlsx");
-    }
-}
-
-function saveexcel()
-{
-    $date=date("Y-m-d");
-    require_once dirname(__FILE__) . '/Classes/PHPExcel/IOFactory.php';
-    $arrayData = array(
-        array(NULL, 2010, 2011, 2012),
-        array('Q1',   12,   15,   21),
-        array('Q2',   56,   73,   86),
-        array('Q3',   52,   61,   69),
-        array('Q4',   30,   32,    0),
-    );
-    $objPHPExcel = new PHPExcel();
-    $objPHPExcel->getActiveSheet()
-        ->fromArray(
-        $arrayData,  // The data to set
-        NULL,        // Array values with this value will not be set
-        'C3'         // Top left coordinate of the worksheet range where
-    //    we want to set these values (default is A1)
-    );
-    $objPHPExcel->getActiveSheet()->getStyle('B3:B7')->getFill()
-        ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
-        ->getStartColor()->setARGB('FFFF0000');
-    $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcel, 'Excel2007');
-    $objWriter->save("report/".$date."/test.xlsx");
-
-}
 
 function dmail($date)
 {
@@ -724,6 +274,257 @@ function dmail($date)
     /* close the connection */
     imap_close($inbox);
     echo "Done";
+}
+
+function scandisk($dir, $sendermail=false)
+{
+    //mysql_query("INSERT INTO temir (text) VALUES('asdf')");
+    $files = scandir($dir, 1);
+    if(is_file($file=$dir.'/'.$files[0]))
+    {
+
+        //parsexcelsimple($file);
+        $info = pathinfo($file);
+        if(!$sendermail)
+        {
+            $sender=explode('--',$info['filename']);
+            if(isset($sender[1])) $sendermail=$sender[1]; else $sendermail='';
+
+            /*if($sendermail=='alla-ultra@mail.ru')
+            {
+                $newname=$dir.'/the--alla-ultra@mail.ru--file.xml';
+                rename($file, $newname); //because alla sends xml file with xls extension
+                $file=$newname;
+            }*/
+        }
+
+        $path = pathinfo(realpath($file), PATHINFO_DIRNAME);
+        if ($info["extension"] == "xls" || $info["extension"] == "xlsx"  || $info["extension"] == "xml")
+        {
+            //file from alla-ultra is saved as xls and it's corrupt. to fix it we use convert() in dmail() and skip the corrupted one here
+            //file from elenaultra is saved as skip and it's kinda also corrupt
+            if (strpos($info["basename"],'alla-ultra@mail.ru--file.xls') === false || strpos($info["basename"],'skip') === false) {
+                parsexcel($file, $sendermail);
+                //parsexcelsimple($file,$sendermail);
+                $sendermail='';
+            }
+            else{$sendermail=false;}
+
+        }
+        elseif($info["extension"] == "zip")
+        {
+            $zip = new ZipArchive;
+            if ($zip->open($file) === TRUE) {
+                $zip->extractTo($path);
+                $zip->close();
+            } else {
+                die("Can't open zip archive");
+            }
+        }
+        elseif($info["extension"] == "rar")
+        {
+            //install rar from here:http://php.net/manual/en/rar.installation.php
+            $rar_file = rar_open($file) or die("Can't open Rar archive");
+            $entries = rar_list($rar_file);
+            foreach ($entries as $entry) {
+                $entry->extract($path);
+            }
+            rar_close($rar_file);
+        }
+        unlink($file);
+        scandisk($dir,$sendermail);
+    }
+}
+
+function parsexcel($file, $sendermail)
+{
+
+    $dbh=$GLOBALS['dbh'];
+    $date=date('Y-m-d');
+    if (!file_exists($file)) {
+        exit('No file yoba');
+    }
+
+    /* Нужно перевести сомы в доллары для тех у кого цены в сомах */
+    if($sendermail=='alex@meloman.kg')
+    {
+        $string = file_get_contents("http://kivano.kg/product/exrateapi");
+        $exrate_arr=json_decode($string, true);
+        $exrate=$exrate_arr['usd'];
+    }
+    else $exrate=false;
+
+    //$notindbs=array();
+
+    /* ------ Здесь мы готовим слова для заголовок столбцов ------*/
+    $match_title=array();
+    $match_price=array();
+
+    $stmt = $dbh->prepare("SELECT title, price, note FROM thead");
+    if ($stmt->execute()) {
+        while ($row = $stmt->fetch()) {
+            if($row['title'] && !in_array($row['title'],$match_title)) $match_title[]=$row['title'];
+            if($row['price'] && !in_array($row['price'],$match_price)) $match_price[]=$row['price'];
+        }
+    }
+
+    /*-----------------*/
+
+    require_once dirname(__FILE__) . '/Classes/PHPExcel/IOFactory.php';
+    $file=mb_convert_encoding($file, 'Windows-1251', 'UTF-8');
+    $objReader = PHPExcel_IOFactory::createReaderForFile($file);
+    $objReader->setReadDataOnly(true);
+    $objPHPExcel=$objReader->load($file);
+
+    //for editing we need another object with formats //except from sigmaplus.kg
+    if($sendermail!='sigma@sigmaplus.kg')
+    {
+        $objReader->setReadDataOnly(false);
+        $objPHPExcelReport=$objReader->load($file);
+    }
+
+    $objWorksheet = $objPHPExcel->getActiveSheet();
+
+    $highestRow = $objWorksheet->getHighestRow(); // e.g. 10
+    $highestColumn = $objWorksheet->getHighestColumn(); // e.g 'F'
+    //$columnIndex=PHPExcel_Cell::stringFromColumnIndex($highestColumn);
+    $highestColumnIndex = PHPExcel_Cell::columnIndexFromString($highestColumn); // e.g. 5
+
+    $sku_products = $dbh->query("SELECT product_id, title FROM sku WHERE sender='{$sendermail}'")->fetchAll(PDO::FETCH_ASSOC);
+
+    $product_rows=$dbh->query("SELECT product_id, price, changed FROM product")->fetchAll(PDO::FETCH_ASSOC);
+    $product_changed=array();
+    $product_price=array();
+    foreach($product_rows as $product_row)
+    {
+        $product_changed[$product_row['product_id']]=$product_row['changed'];
+        $product_price[$product_row['product_id']]=$product_row['price'];
+    }
+    $datesec=strtotime($date);
+
+    for ($row = 1; $row <= $highestRow; ++$row) {
+        $title=''; $price='';
+        for ($col = 0; $col <= $highestColumnIndex; ++$col) {
+            $curval=$objWorksheet->getCellByColumnAndRow($col, $row)->getCalculatedValue();
+
+            if($sendermail=='alex@meloman.kg') //Для этого поставщика отдельное условие ($tcolumn=2; $prcolumn=4;)
+            {
+                if($col==2 && $curval) $title=$curval;
+                elseif($col==4 && $curval) $price=$curval;
+            }
+            else if($sendermail=='elena25@ultra.kg') //Для этого поставщика отдельное условие ($tcolumn=0; $prcolumn=1;)
+            {
+                if($col==0 && $curval) $title=$curval;
+                elseif($col==1 && $curval) $price=$curval;
+            }
+            else
+            {
+                if(!isset($tcolumn) && (in_array($curval,$match_title) || strpos($curval, "Товар/Склад")!== false))
+                {$tcolumn=$col;}
+                if(!isset($prcolumn) && (in_array($curval,$match_price)))
+                {$prcolumn=$col;}
+                if (isset($tcolumn) && isset($prcolumn)) {
+                    if($col==$tcolumn && $curval) $title=$curval;
+                    elseif($col==$prcolumn && $curval) $price=$curval;
+                }
+                elseif($sendermail=='elena_dik@inbox.ru') //laptop prices file from this user doesn't have column headers
+                {
+                    if($col==0 && $curval)$title=$curval;
+                    elseif($col==1 && $curval) $price=$curval;
+                }
+            }
+        }
+
+        if($title && $price)
+        {
+            //echo 'title: '.$title." price:".$price."</br>";
+            if($exrate) $price=$price/$exrate;
+            $title2=strtolower(preg_replace("/\s/", "", $title));
+            $found_in_db=false;
+            $has_id=false;
+            if($sku_products)
+            {
+                foreach($sku_products as $sku_product)
+                {
+                    $pid=$sku_product['product_id'];
+                    $dbtitle=strtolower(preg_replace("/\s/", "", $sku_product['title']));
+                    if($title2==$dbtitle)
+                    {
+                        if($pid)
+                        {
+                            if(isset($product_changed[$pid]))
+                            {
+                                $timediff=$datesec-strtotime($product_changed[$pid]);
+                                $days=$timediff/(60*60*24);
+                            }
+                            if(isset($days) && $days<=7) //если цена была импортирована в течение последних 7и дней
+                            {
+                                if($product_price[$pid]>=$price) //то меняем если предыдущая цена была выше этой (или равна этой чтобы changed оставался актуальным для "наличие")
+                                    $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='1' WHERE product_id='{$pid}'");
+                            }
+                            else
+                            {
+                                $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='2' WHERE product_id='{$pid}'");
+                            }
+                            $has_id=true;
+                        }
+
+                        $found_in_db=true;
+                    }
+                    unset($days);
+                }
+                if(!$has_id)
+                {
+                    if($sendermail=='sigma@sigmaplus.kg')
+                    {
+                        $objPHPExcel->getActiveSheet()->getStyle('A'.$row.':F'.$row)->getFill()
+                            ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
+                            ->getStartColor()->setARGB('FFFF0000');
+                    }
+                    elseif($sendermail=='b2b@intermedia.kg')
+                    {
+                        $objPHPExcelReport->getActiveSheet()->getStyle($highestColumn.$row)->getFill()
+                            ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
+                            ->getStartColor()->setARGB('FFFF0000');
+                    }
+                    else
+                    {
+                        $objPHPExcelReport->getActiveSheet()->getStyle('A'.$row.':F'.$row)->getFill()
+                            ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
+                            ->getStartColor()->setARGB('FFFF0000');
+                    }
+                }
+                if(!$found_in_db)
+                {
+                    $stmt = $dbh->prepare("INSERT INTO sku (title, sender) VALUES (:title, :sender)");
+                    $stmt->bindParam(':title', $title);
+                    $stmt->bindParam(':sender', $sendermail);
+                    $stmt->execute();
+                }
+            }
+            else //new supplier
+            {
+                $sth = $dbh->prepare("SELECT product_id FROM sku WHERE product_id<>'0' AND title=:title");
+                $sth->bindParam(':title', $title, PDO::PARAM_STR);
+                $sth->execute();
+                $row=$sth->fetch(PDO::FETCH_ASSOC);
+                if($row['product_id']) $product_id=$row['product_id']; else $product_id=0;
+
+                $stmt = $dbh->prepare("INSERT INTO sku (title, sender, product_id) VALUES (:title, :sender, :pid)");
+                $stmt->bindParam(':title', $title, PDO::PARAM_STR);
+                $stmt->bindParam(':sender', $sendermail, PDO::PARAM_STR);
+                $stmt->bindParam(':pid', $product_id, PDO::PARAM_INT);
+                $stmt->execute();
+            }
+        }
+    }
+    $rand=rand(1,100);
+    if($sendermail!='sigma@sigmaplus.kg')
+    {
+        $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcelReport, 'Excel2007');
+    }
+    else $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcel, 'Excel2007');
+    $objWriter->save(dirname(__FILE__)."/report/".$date."/".$rand.'-'.$sendermail.".xlsx");
 }
 
 function convert($options = array(), $inputfile = NULL, $outputfile = NULL, &$result = NULL) {
@@ -980,21 +781,6 @@ function listUsers()
     }
 }
 
-function run2(){
-    die();
-    $dbh=$GLOBALS['dbh'];
-    $rows=$dbh->query("SELECT product_id FROM sku WHERE product_id<>0 GROUP BY product_id")->fetchAll(PDO::FETCH_ASSOC);
-    $i=1;
-    foreach($rows as $row){
-        echo $i.')'.$row['product_id'].'<br />';
-        $i++;
-        /*$prod=$dbh->query("SELECT id FROM product WHERE product_id='{$pid}'")->fetch(PDO::FETCH_ASSOC);
-        if(!$prod){
-            $dbh->exec("DELETE FROM sku WHERE product_id='{$pid}'");
-        }*/
-    }
-}
-
 function parsexcel2($file, $sendermail)
 {
 
@@ -1004,7 +790,16 @@ function parsexcel2($file, $sendermail)
         exit('No file yoba');
     }
 
-    $exrate=false;
+    /* Нужно перевести сомы в доллары для тех у кого цены в сомах */
+    if($sendermail=='alex@meloman.kg')
+    {
+        $string = file_get_contents("http://kivano.kg/product/exrateapi");
+        $exrate_arr=json_decode($string, true);
+        $exrate=$exrate_arr['usd'];
+    }
+    else $exrate=false;
+
+    //$notindbs=array();
 
     /* ------ Здесь мы готовим слова для заголовок столбцов ------*/
     $match_title=array();
@@ -1026,22 +821,21 @@ function parsexcel2($file, $sendermail)
     $objReader->setReadDataOnly(true);
     $objPHPExcel=$objReader->load($file);
 
-    $objReader->setReadDataOnly(false);
-    $objPHPExcelReport=$objReader->load($file);
+    //for editing we need another object with formats //except from sigmaplus.kg
+    if($sendermail!='sigma@sigmaplus.kg')
+    {
+        $objReader->setReadDataOnly(false);
+        $objPHPExcelReport=$objReader->load($file);
+    }
 
     $objWorksheet = $objPHPExcel->getActiveSheet();
 
     $highestRow = $objWorksheet->getHighestRow(); // e.g. 10
     $highestColumn = $objWorksheet->getHighestColumn(); // e.g 'F'
+    //$columnIndex=PHPExcel_Cell::stringFromColumnIndex($highestColumn);
     $highestColumnIndex = PHPExcel_Cell::columnIndexFromString($highestColumn); // e.g. 5
-    $sku_products=array();
 
-    $stmt = $dbh->prepare("SELECT product_id, title FROM sku WHERE sender='{$sendermail}'");
-    if ($stmt->execute()) {
-        while ($prod = $stmt->fetch()) {
-            $sku_products[]=array('product_id'=>$prod['product_id'], 'title'=>$prod['title']);
-        }
-    }
+    $sku_products = $dbh->query("SELECT product_id, title FROM sku WHERE sender='{$sendermail}'")->fetchAll(PDO::FETCH_ASSOC);
 
     $product_rows=$dbh->query("SELECT product_id, price, changed FROM product")->fetchAll(PDO::FETCH_ASSOC);
     $product_changed=array();
@@ -1058,6 +852,18 @@ function parsexcel2($file, $sendermail)
         for ($col = 0; $col <= $highestColumnIndex; ++$col) {
             $curval=$objWorksheet->getCellByColumnAndRow($col, $row)->getCalculatedValue();
 
+            if($sendermail=='alex@meloman.kg') //Для этого поставщика отдельное условие ($tcolumn=2; $prcolumn=4;)
+            {
+                if($col==2 && $curval) $title=$curval;
+                elseif($col==4 && $curval) $price=$curval;
+            }
+            else if($sendermail=='elena25@ultra.kg') //Для этого поставщика отдельное условие ($tcolumn=0; $prcolumn=1;)
+            {
+                if($col==0 && $curval) $title=$curval;
+                elseif($col==1 && $curval) $price=$curval;
+            }
+            else
+            {
                 if(!isset($tcolumn) && (in_array($curval,$match_title) || strpos($curval, "Товар/Склад")!== false))
                 {$tcolumn=$col;}
                 if(!isset($prcolumn) && (in_array($curval,$match_price)))
@@ -1066,6 +872,12 @@ function parsexcel2($file, $sendermail)
                     if($col==$tcolumn && $curval) $title=$curval;
                     elseif($col==$prcolumn && $curval) $price=$curval;
                 }
+                elseif($sendermail=='elena_dik@inbox.ru') //laptop prices file from this user doesn't have column headers
+                {
+                    if($col==0 && $curval)$title=$curval;
+                    elseif($col==1 && $curval) $price=$curval;
+                }
+            }
         }
 
         if($title && $price)
@@ -1083,7 +895,7 @@ function parsexcel2($file, $sendermail)
                     $dbtitle=strtolower(preg_replace("/\s/", "", $sku_product['title']));
                     if($title2==$dbtitle)
                     {
-                        if($pid) //this is ref1 function and repeats below
+                        if($pid)
                         {
                             if(isset($product_changed[$pid]))
                             {
@@ -1101,10 +913,16 @@ function parsexcel2($file, $sendermail)
                             }
                             $has_id=true;
                         }
-
                         $found_in_db=true;
                     }
                     unset($days);
+                }
+                if(!$found_in_db)
+                {
+                    $stmt = $dbh->prepare("INSERT INTO sku (title, sender) VALUES (:title, :sender)");
+                    $stmt->bindParam(':title', $title);
+                    $stmt->bindParam(':sender', $sendermail);
+                    $stmt->execute();
                 }
             }
             else //new supplier
@@ -1114,7 +932,8 @@ function parsexcel2($file, $sendermail)
                 $sth->execute();
                 $row=$sth->fetch(PDO::FETCH_ASSOC);
                 if($row['product_id']) $product_id=$row['product_id']; else $product_id=0;
-                if($product_id) //repetition of ref1 function
+
+                if($product_id)
                 {
                     if(isset($product_changed[$product_id]))
                     {
@@ -1140,21 +959,43 @@ function parsexcel2($file, $sendermail)
                 $stmt->execute();
             }
 
-            if(!$found_in_db || !$has_id)
+            if(!$has_id)
             {
-                $objPHPExcelReport->getActiveSheet()->getStyle('A'.$row.':F'.$row)->getFill()
-                    ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
-                    ->getStartColor()->setARGB('FFFF0000');
-
-                $stmt = $dbh->prepare("INSERT INTO sku (title, sender) VALUES (:title, :sender)");
-                $stmt->bindParam(':title', $title);
-                $stmt->bindParam(':sender', $sendermail);
-                $stmt->execute();
+                if($sendermail=='sigma@sigmaplus.kg')
+                {
+                    $objPHPExcel->getActiveSheet()->getStyle('A'.$row.':F'.$row)->getFill()
+                        ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
+                        ->getStartColor()->setARGB('FFFF0000');
+                }
+                elseif($sendermail=='b2b@intermedia.kg')
+                {
+                    $objPHPExcelReport->getActiveSheet()->getStyle($highestColumn.$row)->getFill()
+                        ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
+                        ->getStartColor()->setARGB('FFFF0000');
+                }
+                else
+                {
+                    $objPHPExcelReport->getActiveSheet()->getStyle('A'.$row.':F'.$row)->getFill()
+                        ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
+                        ->getStartColor()->setARGB('FFFF0000');
+                }
             }
         }
     }
     $rand=rand(1,100);
-    $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcelReport, 'Excel2007');
+    if($sendermail!='sigma@sigmaplus.kg')
+    {
+        $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcelReport, 'Excel2007');
+    }
+    else $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcel, 'Excel2007');
     $objWriter->save(dirname(__FILE__)."/report/".$date."/".$rand.'-'.$sendermail.".xlsx");
+}
+
+function run2(){
+    $dbh=$GLOBALS['dbh'];
+    $stmt = $dbh->query("SELECT product_id, title FROM sku LIMIT 3")->fetchAll(PDO::FETCH_ASSOC);
+    echo "<pre>";
+    print_r($stmt);
+    echo "</pre>";
 }
 ?>

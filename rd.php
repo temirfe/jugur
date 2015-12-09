@@ -587,5 +587,18 @@ function priceAPI($date)
     header('Content-type: application/json');
     echo $json;
 }
-
+function run2(){
+    die();
+    $dbh=$GLOBALS['dbh'];
+    $rows=$dbh->query("SELECT product_id FROM sku WHERE product_id<>0 GROUP BY product_id")->fetchAll(PDO::FETCH_ASSOC);
+    $i=1;
+    foreach($rows as $row){
+        echo $i.')'.$row['product_id'].'<br />';
+        $i++;
+        /*$prod=$dbh->query("SELECT id FROM product WHERE product_id='{$pid}'")->fetch(PDO::FETCH_ASSOC);
+        if(!$prod){
+            $dbh->exec("DELETE FROM sku WHERE product_id='{$pid}'");
+        }*/
+    }
+}
 ?>
