@@ -42,7 +42,6 @@ if(isset($argv))
     }
     elseif($argv[1]=='checkmail')
     {
-
         dmail($date);
     }
     elseif($argv[1]=='parse')
@@ -994,5 +993,168 @@ function run2(){
             $dbh->exec("DELETE FROM sku WHERE product_id='{$pid}'");
         }*/
     }
+}
+
+function parsexcel2($file, $sendermail)
+{
+
+    $dbh=$GLOBALS['dbh'];
+    $date=date('Y-m-d');
+    if (!file_exists($file)) {
+        exit('No file yoba');
+    }
+
+    $exrate=false;
+
+    /* ------ Здесь мы готовим слова для заголовок столбцов ------*/
+    $match_title=array();
+    $match_price=array();
+
+    $stmt = $dbh->prepare("SELECT title, price, note FROM thead");
+    if ($stmt->execute()) {
+        while ($row = $stmt->fetch()) {
+            if($row['title'] && !in_array($row['title'],$match_title)) $match_title[]=$row['title'];
+            if($row['price'] && !in_array($row['price'],$match_price)) $match_price[]=$row['price'];
+        }
+    }
+
+    /*-----------------*/
+
+    require_once dirname(__FILE__) . '/Classes/PHPExcel/IOFactory.php';
+    $file=mb_convert_encoding($file, 'Windows-1251', 'UTF-8');
+    $objReader = PHPExcel_IOFactory::createReaderForFile($file);
+    $objReader->setReadDataOnly(true);
+    $objPHPExcel=$objReader->load($file);
+
+    $objReader->setReadDataOnly(false);
+    $objPHPExcelReport=$objReader->load($file);
+
+    $objWorksheet = $objPHPExcel->getActiveSheet();
+
+    $highestRow = $objWorksheet->getHighestRow(); // e.g. 10
+    $highestColumn = $objWorksheet->getHighestColumn(); // e.g 'F'
+    $highestColumnIndex = PHPExcel_Cell::columnIndexFromString($highestColumn); // e.g. 5
+    $sku_products=array();
+
+    $stmt = $dbh->prepare("SELECT product_id, title FROM sku WHERE sender='{$sendermail}'");
+    if ($stmt->execute()) {
+        while ($prod = $stmt->fetch()) {
+            $sku_products[]=array('product_id'=>$prod['product_id'], 'title'=>$prod['title']);
+        }
+    }
+
+    $product_rows=$dbh->query("SELECT product_id, price, changed FROM product")->fetchAll(PDO::FETCH_ASSOC);
+    $product_changed=array();
+    $product_price=array();
+    foreach($product_rows as $product_row)
+    {
+        $product_changed[$product_row['product_id']]=$product_row['changed'];
+        $product_price[$product_row['product_id']]=$product_row['price'];
+    }
+    $datesec=strtotime($date);
+
+    for ($row = 1; $row <= $highestRow; ++$row) {
+        $title=''; $price='';
+        for ($col = 0; $col <= $highestColumnIndex; ++$col) {
+            $curval=$objWorksheet->getCellByColumnAndRow($col, $row)->getCalculatedValue();
+
+                if(!isset($tcolumn) && (in_array($curval,$match_title) || strpos($curval, "Товар/Склад")!== false))
+                {$tcolumn=$col;}
+                if(!isset($prcolumn) && (in_array($curval,$match_price)))
+                {$prcolumn=$col;}
+                if (isset($tcolumn) && isset($prcolumn)) {
+                    if($col==$tcolumn && $curval) $title=$curval;
+                    elseif($col==$prcolumn && $curval) $price=$curval;
+                }
+        }
+
+        if($title && $price)
+        {
+            //echo 'title: '.$title." price:".$price."</br>";
+            if($exrate) $price=$price/$exrate;
+            $title2=strtolower(preg_replace("/\s/", "", $title));
+            $found_in_db=false;
+            $has_id=false;
+            if($sku_products)
+            {
+                foreach($sku_products as $sku_product)
+                {
+                    $pid=$sku_product['product_id'];
+                    $dbtitle=strtolower(preg_replace("/\s/", "", $sku_product['title']));
+                    if($title2==$dbtitle)
+                    {
+                        if($pid) //this is ref1 function and repeats below
+                        {
+                            if(isset($product_changed[$pid]))
+                            {
+                                $timediff=$datesec-strtotime($product_changed[$pid]);
+                                $days=$timediff/(60*60*24);
+                            }
+                            if(isset($days) && $days<=7) //если цена была импортирована в течение последних 7и дней
+                            {
+                                if($product_price[$pid]>=$price) //то меняем если предыдущая цена была выше этой (или равна этой чтобы changed оставался актуальным для "наличие")
+                                    $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='1' WHERE product_id='{$pid}'");
+                            }
+                            else
+                            {
+                                $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='2' WHERE product_id='{$pid}'");
+                            }
+                            $has_id=true;
+                        }
+
+                        $found_in_db=true;
+                    }
+                    unset($days);
+                }
+            }
+            else //new supplier
+            {
+                $sth = $dbh->prepare("SELECT product_id FROM sku WHERE product_id<>'0' AND title=:title");
+                $sth->bindParam(':title', $title, PDO::PARAM_STR);
+                $sth->execute();
+                $row=$sth->fetch(PDO::FETCH_ASSOC);
+                if($row['product_id']) $product_id=$row['product_id']; else $product_id=0;
+                if($product_id) //repetition of ref1 function
+                {
+                    if(isset($product_changed[$product_id]))
+                    {
+                        $timediff=$datesec-strtotime($product_changed[$product_id]);
+                        $days=$timediff/(60*60*24);
+                    }
+                    if(isset($days) && $days<=7) //если цена была импортирована в течение последних 7и дней
+                    {
+                        if($product_price[$product_id]>=$price) //то меняем если предыдущая цена была выше этой (или равна этой чтобы changed оставался актуальным для "наличие")
+                            $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='1' WHERE product_id='{$product_id}'");
+                    }
+                    else
+                    {
+                        $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='2' WHERE product_id='{$product_id}'");
+                    }
+                    $has_id=true;
+                }
+
+                $stmt = $dbh->prepare("INSERT INTO sku (title, sender, product_id) VALUES (:title, :sender, :pid)");
+                $stmt->bindParam(':title', $title, PDO::PARAM_STR);
+                $stmt->bindParam(':sender', $sendermail, PDO::PARAM_STR);
+                $stmt->bindParam(':pid', $product_id, PDO::PARAM_INT);
+                $stmt->execute();
+            }
+
+            if(!$found_in_db || !$has_id)
+            {
+                $objPHPExcelReport->getActiveSheet()->getStyle('A'.$row.':F'.$row)->getFill()
+                    ->setFillType(PHPExcel_Style_Fill::FILL_SOLID)
+                    ->getStartColor()->setARGB('FFFF0000');
+
+                $stmt = $dbh->prepare("INSERT INTO sku (title, sender) VALUES (:title, :sender)");
+                $stmt->bindParam(':title', $title);
+                $stmt->bindParam(':sender', $sendermail);
+                $stmt->execute();
+            }
+        }
+    }
+    $rand=rand(1,100);
+    $objWriter = PHPExcel_IOFactory::createWriter($objPHPExcelReport, 'Excel2007');
+    $objWriter->save(dirname(__FILE__)."/report/".$date."/".$rand.'-'.$sendermail.".xlsx");
 }
 ?>
