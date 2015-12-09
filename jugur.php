@@ -64,10 +64,10 @@ if(isset($argv))
 }
 else{
     //dmail($date);
-    //scandisk($dir);
+    scandisk($dir);
     //sku2();
     //run();
-    run2();
+    //run2();
 }
 //saveexcel();
 //parsexcelsimple($dir);
@@ -304,7 +304,7 @@ function scandisk($dir, $sendermail=false)
             //file from alla-ultra is saved as xls and it's corrupt. to fix it we use convert() in dmail() and skip the corrupted one here
             //file from elenaultra is saved as skip and it's kinda also corrupt
             if (strpos($info["basename"],'alla-ultra@mail.ru--file.xls') === false || strpos($info["basename"],'skip') === false) {
-                parsexcel($file, $sendermail);
+                parsexcel2($file, $sendermail);
                 //parsexcelsimple($file,$sendermail);
                 $sendermail='';
             }
@@ -331,8 +331,8 @@ function scandisk($dir, $sendermail=false)
             }
             rar_close($rar_file);
         }
-        unlink($file);
-        scandisk($dir,$sendermail);
+        //unlink($file);
+        //scandisk($dir,$sendermail);
     }
 }
 
@@ -837,16 +837,17 @@ function parsexcel2($file, $sendermail)
 
     $sku_products = $dbh->query("SELECT product_id, title FROM sku WHERE sender='{$sendermail}'")->fetchAll(PDO::FETCH_ASSOC);
 
-    $product_rows=$dbh->query("SELECT product_id, price, changed FROM product")->fetchAll(PDO::FETCH_ASSOC);
+    $product_rows=$dbh->query("SELECT product_id, price, changed, manual FROM product")->fetchAll(PDO::FETCH_ASSOC);
     $product_changed=array();
     $product_price=array();
     foreach($product_rows as $product_row)
     {
         $product_changed[$product_row['product_id']]=$product_row['changed'];
         $product_price[$product_row['product_id']]=$product_row['price'];
+        $product_manual[$product_row['product_id']]=$product_row['manual'];
     }
     $datesec=strtotime($date);
-
+    $processed=array();
     for ($row = 1; $row <= $highestRow; ++$row) {
         $title=''; $price='';
         for ($col = 0; $col <= $highestColumnIndex; ++$col) {
@@ -906,12 +907,18 @@ function parsexcel2($file, $sendermail)
                             {
                                 if($product_price[$pid]>=$price) //то меняем если предыдущая цена была выше этой (или равна этой чтобы changed оставался актуальным для "наличие")
                                     $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='1' WHERE product_id='{$pid}'");
+                                else
+                                    $dbh->exec("INSERT INTO temir (text) VALUES ('f {$pid}')");
                             }
                             else
                             {
                                 $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='2' WHERE product_id='{$pid}'");
                             }
                             $has_id=true;
+                            if(in_array($pid,$processed)) $repetetion=' повтор'; else $repetetion='';
+                            $thecol=5;
+                            $objPHPExcelReport->getActiveSheet()->setCellValueByColumnAndRow($thecol, $row, $pid);
+                            $processed[]=$pid;
                         }
                         $found_in_db=true;
                     }
@@ -943,13 +950,18 @@ function parsexcel2($file, $sendermail)
                     if(isset($days) && $days<=7) //если цена была импортирована в течение последних 7и дней
                     {
                         if($product_price[$product_id]>=$price) //то меняем если предыдущая цена была выше этой (или равна этой чтобы changed оставался актуальным для "наличие")
-                            $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='1' WHERE product_id='{$product_id}'");
+                            $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='3' WHERE product_id='{$product_id}'");
+                        else
+                            $dbh->exec("INSERT INTO temir (text) VALUES ('s {$product_id}')");
                     }
                     else
                     {
-                        $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='2' WHERE product_id='{$product_id}'");
+                        $dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='4' WHERE product_id='{$product_id}'");
                     }
                     $has_id=true;
+                    if(in_array($product_id,$processed)) $repetetion=' повтор'; else $repetetion='';
+                    $objPHPExcelReport->getActiveSheet()->setCellValueByColumnAndRow($col+1, $row, $product_id.' '.$repetetion);
+                    $processed[]=$product_id;
                 }
 
                 $stmt = $dbh->prepare("INSERT INTO sku (title, sender, product_id) VALUES (:title, :sender, :pid)");
@@ -982,6 +994,8 @@ function parsexcel2($file, $sendermail)
             }
         }
     }
+    //$pids=implode(',',$processed);
+    //$objPHPExcelReport->getActiveSheet()->setCellValueByColumnAndRow(7, 1, $pids);
     $rand=rand(1,100);
     if($sendermail!='sigma@sigmaplus.kg')
     {
@@ -991,11 +1005,161 @@ function parsexcel2($file, $sendermail)
     $objWriter->save(dirname(__FILE__)."/report/".$date."/".$rand.'-'.$sendermail.".xlsx");
 }
 
+function parsexcel3($file, $sendermail)
+{
+
+    $dbh=$GLOBALS['dbh'];
+    $date=date('Y-m-d');
+    if (!file_exists($file)) {
+        exit('No file yoba');
+    }
+    $exrate=false;
+
+    //$notindbs=array();
+
+    /* ------ Здесь мы готовим слова для заголовок столбцов ------*/
+    $match_title=array();
+    $match_price=array();
+
+    $stmt = $dbh->prepare("SELECT title, price, note FROM thead");
+    if ($stmt->execute()) {
+        while ($row = $stmt->fetch()) {
+            if($row['title'] && !in_array($row['title'],$match_title)) $match_title[]=$row['title'];
+            if($row['price'] && !in_array($row['price'],$match_price)) $match_price[]=$row['price'];
+        }
+    }
+
+    /*-----------------*/
+
+    require_once dirname(__FILE__) . '/Classes/PHPExcel/IOFactory.php';
+    $file=mb_convert_encoding($file, 'Windows-1251', 'UTF-8');
+    $objReader = PHPExcel_IOFactory::createReaderForFile($file);
+    $objReader->setReadDataOnly(true);
+    $objPHPExcel=$objReader->load($file);
+
+    //for editing we need another object with formats //except from sigmaplus.kg
+    if($sendermail!='sigma@sigmaplus.kg')
+    {
+        $objReader->setReadDataOnly(false);
+        $objPHPExcelReport=$objReader->load($file);
+    }
+
+    $objWorksheet = $objPHPExcel->getActiveSheet();
+
+    $highestRow = $objWorksheet->getHighestRow(); // e.g. 10
+    $highestColumn = $objWorksheet->getHighestColumn(); // e.g 'F'
+    //$columnIndex=PHPExcel_Cell::stringFromColumnIndex($highestColumn);
+    $highestColumnIndex = PHPExcel_Cell::columnIndexFromString($highestColumn); // e.g. 5
+
+    $sku_products = $dbh->query("SELECT product_id, title FROM sku WHERE sender='{$sendermail}'")->fetchAll(PDO::FETCH_ASSOC);
+
+    $product_rows=$dbh->query("SELECT product_id, price, changed, manual FROM product")->fetchAll(PDO::FETCH_ASSOC);
+    $product_changed=array();
+    $product_price=array();
+    foreach($product_rows as $product_row)
+    {
+        $product_changed[$product_row['product_id']]=$product_row['changed'];
+        $product_price[$product_row['product_id']]=$product_row['price'];
+        $product_manual[$product_row['product_id']]=$product_row['manual'];
+    }
+    $datesec=strtotime($date);
+    $processed=array();
+    for ($row = 1; $row <= $highestRow; ++$row) {
+        $title=''; $price='';
+        for ($col = 0; $col <= $highestColumnIndex; ++$col) {
+            $curval=$objWorksheet->getCellByColumnAndRow($col, $row)->getCalculatedValue();
+
+            if($sendermail=='alex@meloman.kg') //Для этого поставщика отдельное условие ($tcolumn=2; $prcolumn=4;)
+            {
+                if($col==2 && $curval) $title=$curval;
+                elseif($col==4 && $curval) $price=$curval;
+            }
+            else if($sendermail=='elena25@ultra.kg') //Для этого поставщика отдельное условие ($tcolumn=0; $prcolumn=1;)
+            {
+                if($col==0 && $curval) $title=$curval;
+                elseif($col==1 && $curval) $price=$curval;
+            }
+            else
+            {
+                if(!isset($tcolumn) && (in_array($curval,$match_title) || strpos($curval, "Товар/Склад")!== false))
+                {$tcolumn=$col;}
+                if(!isset($prcolumn) && (in_array($curval,$match_price)))
+                {$prcolumn=$col;}
+                if (isset($tcolumn) && isset($prcolumn)) {
+                    if($col==$tcolumn && $curval) $title=$curval;
+                    elseif($col==$prcolumn && $curval) $price=$curval;
+                }
+                elseif($sendermail=='elena_dik@inbox.ru') //laptop prices file from this user doesn't have column headers
+                {
+                    if($col==0 && $curval)$title=$curval;
+                    elseif($col==1 && $curval) $price=$curval;
+                }
+            }
+        }
+
+        if($title && $price)
+        {
+            //echo 'title: '.$title." price:".$price."</br>";
+            if($exrate) $price=$price/$exrate;
+            $title2=strtolower(preg_replace("/\s/", "", $title));
+            $found_in_db=false;
+            $has_id=false;
+            if($sku_products)
+            {
+                foreach($sku_products as $sku_product)
+                {
+                    $pid=$sku_product['product_id'];
+                    $dbtitle=strtolower(preg_replace("/\s/", "", $sku_product['title']));
+                    if($title2==$dbtitle)
+                    {
+                        if($pid)
+                        {
+                            echo $pid."<br />";
+                            if(isset($product_changed[$pid]))
+                            {
+                                $timediff=$datesec-strtotime($product_changed[$pid]);
+                                $days=$timediff/(60*60*24);
+                                echo 'days: '.$days."<br />";
+                            }
+                            if(isset($days) && $days<=7) //если цена была импортирована в течение последних 7и дней
+                            {
+                                echo "cond2 <br />";
+                                if($product_price[$pid]>=$price) //то меняем если предыдущая цена была выше этой (или равна этой чтобы changed оставался актуальным для "наличие")
+                                    echo 'p1: '.$product_price[$pid]." p2:".$price."<br />";
+                                else echo 'cond 3 <br />';
+                                    //$dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='1' WHERE product_id='{$pid}'");
+                            }
+                            else
+                            {
+                                echo 'cond 4 <br />';
+                                //$dbh->exec("UPDATE product SET price='{$price}', changed='{$date}', sender='{$sendermail}', note='2' WHERE product_id='{$pid}'");
+                            }
+                        }
+                    }
+                    unset($days);
+                }
+            }
+        }
+    }
+}
+
 function run2(){
     $dbh=$GLOBALS['dbh'];
-    $stmt = $dbh->query("SELECT product_id, title FROM sku LIMIT 3")->fetchAll(PDO::FETCH_ASSOC);
-    echo "<pre>";
+   /* $product_id=34;
+    $dbh->exec("INSERT INTO temir (text) VALUES ('hehe {$product_id}')");
+    die();*/
+    $pid=234;
+    $dbh->exec("INSERT INTO temir (text) VALUES ('f {$pid}')");
+    /*$stmt = $dbh->query("SELECT product_id FROM product WHERE sender='sales@intercom.kg' AND changed='2015-12-09'")->fetchAll(PDO::FETCH_ASSOC);
+    $i=1;
+    $ids="17012,19158,20399,17019,8507,17023,16898,8509,20425,9232,19780,19778,20389,19166,17788,19167,19890,19168,19170,19976,19978,19979,19891,4916,19892,19181,19184,7955,9048,2949,4865,8525,8533,20006,20007,20008,7939,4828,19186,19189,20009,4184,4185,17035,20012,20013,20415,20416,9202,9203,9204,17039,17044,17045,20417,20418,20419,10076,10077,20420,20020,9170,20421,20422,20423,20424,20023,20024,19893,17896,19210,20025,9210,9211,20026,20027,20028,20029,17055,14431,17057,19212,19213,19242,20032,20033,20034,20035,20036,20037,17908,17909,17911,19243,17907,19244,19245,9228,7943,7941,7942,8183,8184,8182,8181,9393,9967,17115,10299,10016,19068,9971,20348,9408,19841,2798,19259,11745,17799,19133,19072,20428,19075,20429,20430,20431,19076,20432,20433,20434,20435,19077,19288,20436,19342,19343,17036,20437,9367,9368,17043";
+    $products=array();
+    foreach($stmt as $row){
+        $ids=str_replace($row['product_id'],'',$ids);
+    }
+    echo $ids;*/
+    /*echo "<pre>";
     print_r($stmt);
-    echo "</pre>";
+    echo "</pre>";*/
 }
 ?>
